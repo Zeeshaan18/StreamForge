@@ -1,0 +1,116 @@
+services:
+  # ====================================================================
+  # 1. Streamlit Real-Time Analytics Dashboard (Web Service)
+  # ====================================================================
+  - type: web
+    name: streamforge-dashboard
+    runtime: docker
+    dockerfilePath: dashboard/Dockerfile
+    plan: free
+    healthCheckPath: /_stcore/health
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: datapulse-warehouse
+          property: connectionString
+      - key: APP_ENV
+        value: production
+      - key: LOG_LEVEL
+        value: INFO
+      - key: STREAMLIT_AUTO_REFRESH_INTERVAL
+        value: "3"
+
+  # ====================================================================
+  # 2. Continuous Synthetic Event Generator (Background Worker)
+  # ====================================================================
+  - type: worker
+    name: streamforge-generator
+    runtime: docker
+    dockerfilePath: generator/Dockerfile
+    plan: starter
+    envVars:
+      - key: KAFKA_BOOTSTRAP_SERVERS
+        value: streamforge-kafka:9092
+      - key: KAFKA_RAW_ORDERS_TOPIC
+        value: raw_orders
+      - key: DATABASE_URL
+        fromDatabase:
+          name: datapulse-warehouse
+          property: connectionString
+      - key: GENERATOR_RATE_PER_SECOND
+        value: "5.0"
+      - key: GENERATOR_BURST_PROBABILITY
+        value: "0.08"
+      - key: GENERATOR_ERROR_INJECTION_RATE
+        value: "0.04"
+      - key: GENERATOR_DUPLICATE_RATE
+        value: "0.02"
+
+  # ====================================================================
+  # 3. Stream & Micro-Batch Processor Engine (Background Worker)
+  # ====================================================================
+  - type: worker
+    name: streamforge-stream-processor
+    runtime: docker
+    dockerfilePath: spark/Dockerfile
+    plan: starter
+    envVars:
+      - key: KAFKA_BOOTSTRAP_SERVERS
+        value: streamforge-kafka:9092
+      - key: KAFKA_RAW_ORDERS_TOPIC
+        value: raw_orders
+      - key: KAFKA_CONSUMER_GROUP
+        value: datapulse-spark-consumer
+      - key: DATABASE_URL
+        fromDatabase:
+          name: datapulse-warehouse
+          property: connectionString
+      - key: SPARK_BATCH_DURATION_SECONDS
+        value: "3"
+
+  # ====================================================================
+  # 4. Apache Kafka KRaft Broker (Private Service)
+  # ====================================================================
+  - type: pserv
+    name: streamforge-kafka
+    runtime: image
+    image:
+      url: apache/kafka:3.7.0
+    plan: starter
+    envVars:
+      - key: KAFKA_NODE_ID
+        value: "1"
+      - key: KAFKA_PROCESS_ROLES
+        value: "broker,controller"
+      - key: KAFKA_LISTENERS
+        value: "PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093"
+      - key: KAFKA_ADVERTISED_LISTENERS
+        value: "PLAINTEXT://streamforge-kafka:9092"
+      - key: KAFKA_CONTROLLER_LISTENER_NAMES
+        value: "CONTROLLER"
+      - key: KAFKA_LISTENER_SECURITY_PROTOCOL_MAP
+        value: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT"
+      - key: KAFKA_CONTROLLER_QUORUM_VOTERS
+        value: "1@localhost:9093"
+      - key: KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR
+        value: "1"
+      - key: KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR
+        value: "1"
+      - key: KAFKA_TRANSACTION_STATE_LOG_MIN_ISR
+        value: "1"
+      - key: KAFKA_AUTO_CREATE_TOPICS_ENABLE
+        value: "true"
+      - key: KAFKA_LOG_DIRS
+        value: "/tmp/kraft-combined-logs"
+      - key: CLUSTER_ID
+        value: "4L62EnnTTMuzxq1WoE43Aw"
+
+# ====================================================================
+# Managed Relational Data Warehouse
+# ====================================================================
+databases:
+  - name: datapulse-warehouse
+    databaseName: datapulse_warehouse
+    user: datapulse_user
+    plan: free
+    ipAllowList: []
