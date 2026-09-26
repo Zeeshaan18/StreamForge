@@ -46,6 +46,34 @@ def get_executive_kpis() -> Dict[str, Any]:
     }
 
 
+def get_live_ingest_rate() -> float:
+    """Calculates actual live ingestion rate (events per second) over recent time window."""
+    try:
+        # Check recent fact order count in the last 30 seconds
+        if getattr(db_manager, "_is_sqlite_fallback", False):
+            query = "SELECT COUNT(*) as cnt FROM fact_orders WHERE processed_at >= datetime('now', '-30 seconds')"
+        else:
+            query = "SELECT COUNT(*) as cnt FROM fact_orders WHERE processed_at >= NOW() - INTERVAL '30 seconds'"
+        rows = db_manager.execute_query(query)
+        count = rows[0]["cnt"] if rows else 0
+        if count > 0:
+            return round(count / 30.0, 1)
+
+        # Check latest pipeline health metric batch
+        latest = db_manager.execute_query("""
+            SELECT metric_value 
+            FROM pipeline_health_metrics 
+            WHERE metric_name = 'BATCH_RECORDS_PROCESSED' 
+            ORDER BY timestamp DESC 
+            LIMIT 1
+        """)
+        if latest and float(latest[0]["metric_value"]) > 0:
+            return round(float(latest[0]["metric_value"]) / 3.0, 1)
+    except Exception:
+        pass
+    return 0.0
+
+
 def get_recent_orders_feed(limit: int = 50) -> pd.DataFrame:
     """Retrieves most recent stream-ingested order events."""
     query = f"""

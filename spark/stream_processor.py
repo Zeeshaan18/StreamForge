@@ -84,6 +84,15 @@ class StreamProcessor:
             logger.warning(f"PySpark cluster streaming initialization failed ({e}). Falling back to native stream consumer.")
             self.run_native_stream_consumer()
 
+    def _check_kafka_available(self, host: str, port: int, timeout: float = 2.0) -> bool:
+        """Tests if Kafka broker host and port are reachable."""
+        import socket
+        try:
+            with socket.create_connection((host, port), timeout=timeout):
+                return True
+        except Exception:
+            return False
+
     def run_native_stream_consumer(self, max_batches: int = None):
         """
         High-efficiency streaming consumer loop.
@@ -98,34 +107,26 @@ class StreamProcessor:
         host = first_broker.split(":")[0] if ":" in first_broker else first_broker
         port = int(first_broker.split(":")[1]) if ":" in first_broker else 9092
 
-        kafka_online = False
-        try:
-            with socket.create_connection((host, port), timeout=2.0):
-                kafka_online = True
-        except Exception:
-            kafka_online = False
-
         consumer = None
-        if kafka_online:
+        consumer_kwargs = {
+            "bootstrap_servers": self.bootstrap_servers.split(","),
+            "auto_offset_reset": settings.KAFKA_AUTO_OFFSET_RESET,
+            "enable_auto_commit": True,
+            "group_id": settings.KAFKA_CONSUMER_GROUP,
+            "value_deserializer": lambda x: json.loads(x.decode("utf-8")),
+            "consumer_timeout_ms": 1000
+        }
+
+        if settings.KAFKA_SECURITY_PROTOCOL and settings.KAFKA_SECURITY_PROTOCOL.upper() != "PLAINTEXT":
+            consumer_kwargs["security_protocol"] = settings.KAFKA_SECURITY_PROTOCOL.upper()
+            consumer_kwargs["sasl_mechanism"] = settings.KAFKA_SASL_MECHANISM or "PLAIN"
+            if settings.KAFKA_SASL_USERNAME and settings.KAFKA_SASL_PASSWORD:
+                consumer_kwargs["sasl_plain_username"] = settings.KAFKA_SASL_USERNAME
+                consumer_kwargs["sasl_plain_password"] = settings.KAFKA_SASL_PASSWORD
+
+        if self._check_kafka_available(host, port, timeout=2.0):
             try:
                 from kafka import KafkaConsumer
-                consumer_kwargs = {
-                    "bootstrap_servers": self.bootstrap_servers.split(","),
-                    "auto_offset_reset": settings.KAFKA_AUTO_OFFSET_RESET,
-                    "enable_auto_commit": True,
-                    "group_id": settings.KAFKA_CONSUMER_GROUP,
-                    "value_deserializer": lambda x: json.loads(x.decode("utf-8")),
-                    "consumer_timeout_ms": 1000
-                }
-
-                # Optional SASL / SSL support for cloud brokers
-                if settings.KAFKA_SECURITY_PROTOCOL and settings.KAFKA_SECURITY_PROTOCOL.upper() != "PLAINTEXT":
-                    consumer_kwargs["security_protocol"] = settings.KAFKA_SECURITY_PROTOCOL.upper()
-                    consumer_kwargs["sasl_mechanism"] = settings.KAFKA_SASL_MECHANISM or "PLAIN"
-                    if settings.KAFKA_SASL_USERNAME and settings.KAFKA_SASL_PASSWORD:
-                        consumer_kwargs["sasl_plain_username"] = settings.KAFKA_SASL_USERNAME
-                        consumer_kwargs["sasl_plain_password"] = settings.KAFKA_SASL_PASSWORD
-
                 consumer = KafkaConsumer(
                     self.topic,
                     **consumer_kwargs
@@ -134,12 +135,26 @@ class StreamProcessor:
             except Exception as e:
                 logger.warning(f"Kafka consumer connection failed ({e}). Running with generator fallback stream.")
                 consumer = None
+        else:
+            logger.warning(f"Kafka broker not reachable at {host}:{port}. Running with resilient generator stream.")
 
         batches_processed = 0
+        last_reconnect_attempt = 0.0
         from generator.order_generator import order_generator
 
         try:
             while self.running and (max_batches is None or batches_processed < max_batches):
+                # Periodically retry Kafka connection if currently in fallback
+                if consumer is None and time.time() - last_reconnect_attempt > 5.0:
+                    last_reconnect_attempt = time.time()
+                    if self._check_kafka_available(host, port, timeout=2.0):
+                        try:
+                            from kafka import KafkaConsumer
+                            consumer = KafkaConsumer(self.topic, **consumer_kwargs)
+                            logger.info("Successfully connected and subscribed to live Kafka broker topic.")
+                        except Exception:
+                            consumer = None
+
                 batch_start = time.time()
                 batch_events: List[Dict[str, Any]] = []
 

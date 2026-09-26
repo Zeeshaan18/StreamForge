@@ -14,8 +14,12 @@ import streamlit as st
 import pandas as pd
 from dashboard.components.ui_helpers import apply_custom_css, render_metric_card
 from dashboard.components.charts import create_geo_scatter_map
-from dashboard.db_queries import get_recent_orders_feed, get_geographic_distribution, get_executive_kpis
+from dashboard.db_queries import get_recent_orders_feed, get_geographic_distribution, get_executive_kpis, get_live_ingest_rate
+from dashboard.pipeline_runner import ensure_background_pipeline_running
 from database.db_connection import db_manager
+
+# Ensure background streaming pipeline is active
+ensure_background_pipeline_running()
 
 st.set_page_config(page_title="Live Order Monitor | DataPulse", page_icon="⚡", layout="wide")
 apply_custom_css()
@@ -26,11 +30,14 @@ st.markdown("Real-time event stream arriving from Kafka & processed through PySp
 kpis = get_executive_kpis()
 orders_df = get_recent_orders_feed(limit=50)
 geo_df = get_geographic_distribution()
+ingest_rate = get_live_ingest_rate()
 
 # KPI Row
 col1, col2, col3 = st.columns(3)
 with col1:
-    render_metric_card("Live Ingest Rate", "~5.0 eps", "Streaming Velocity")
+    rate_status = "success" if ingest_rate > 0 else "warning"
+    rate_label = f"{ingest_rate:.1f} eps" if ingest_rate > 0 else "Idle / Standby"
+    render_metric_card("Live Ingest Rate", rate_label, "Streaming Velocity", status=rate_status)
 with col2:
     render_metric_card("Total Orders Captured", f"{kpis['total_orders']:,}", "Database Warehouse Fact Rows")
 with col3:

@@ -17,6 +17,10 @@ from config.settings import settings
 from database.db_connection import db_manager
 from dashboard.components.ui_helpers import apply_custom_css, render_metric_card
 from dashboard.db_queries import get_executive_kpis, get_pipeline_health_status
+from dashboard.pipeline_runner import ensure_background_pipeline_running
+
+# Launch background stream supervisor (runs real-time ingestion continuously)
+ensure_background_pipeline_running()
 
 # Configure page metadata
 st.set_page_config(

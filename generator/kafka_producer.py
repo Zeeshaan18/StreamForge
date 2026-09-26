@@ -38,6 +38,7 @@ class IngestionProducer:
         self._producer: Optional[KafkaProducer] = None
         self._is_mock_mode = False
         self._mock_buffer = []
+        self._last_reconnect_attempt = 0.0
         self._init_producer()
 
     def _check_kafka_available(self, host: str, port: int, timeout: float = 2.0) -> bool:
@@ -83,6 +84,7 @@ class IngestionProducer:
                     producer_kwargs["sasl_plain_password"] = settings.KAFKA_SASL_PASSWORD
 
             self._producer = KafkaProducer(**producer_kwargs)
+            self._is_mock_mode = False
             logger.info(f"Connected to Kafka broker at {self.bootstrap_servers}, target topic: '{self.topic}'")
         except Exception as e:
             logger.warning(f"Kafka connection failed ({e}). Running in simulation mode.")
@@ -93,22 +95,29 @@ class IngestionProducer:
         event_id = event.get("event_id")
         order_id = event.get("order_id")
 
+        # Periodically retry Kafka connection if currently in fallback
         if self._is_mock_mode:
+            now = time.time()
+            if now - self._last_reconnect_attempt > 5.0:
+                self._last_reconnect_attempt = now
+                self._init_producer()
+
+        if self._is_mock_mode or not self._producer:
             self._mock_buffer.append(event)
             if len(self._mock_buffer) > 1000:
                 self._mock_buffer.pop(0)
             return True
 
         try:
-            future = self._producer.send(
+            self._producer.send(
                 self.topic,
                 key=order_id,
                 value=event
             )
-            # Asynchronous send with callback / flush logic
             return True
         except Exception as e:
-            logger.error(f"Failed to publish event {event_id} to Kafka: {e}")
+            logger.warning(f"Failed to publish event {event_id} to Kafka: {e}. Falling back to simulation mode.")
+            self._is_mock_mode = True
             return False
 
     def run(self, max_events: int = None):
