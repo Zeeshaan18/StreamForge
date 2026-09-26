@@ -17,4 +17,4 @@ EXPOSE 8501
 
 HEALTHCHECK CMD python -c "import os, urllib.request; port = os.environ.get('PORT', '8501'); urllib.request.urlopen('http://localhost:' + port + '/_stcore/health')" || exit 1
 
-CMD ["sh", "-c", "streamlit run dashboard/app.py --server.port=${PORT:-8501} --server.address=0.0.0.0 --server.headless=true --browser.gatherUsageStats=false"]
+CMD ["sh", "-c", "python -m database.init_db && streamlit run dashboard/app.py --server.port=${PORT:-8501} --server.address=0.0.0.0 --server.headless=true --browser.gatherUsageStats=false"]

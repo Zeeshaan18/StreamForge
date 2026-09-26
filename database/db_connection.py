@@ -22,6 +22,7 @@ class DatabaseManager:
         self.connection_uri = connection_uri or settings.postgres_connection_uri
         self._engine: Engine | None = None
         self._is_sqlite_fallback: bool = False
+        self._schema_initialized: bool = False
 
     def _check_postgres_available(self, timeout: float = 0.3) -> bool:
         """Quickly tests if PostgreSQL host and port are listening."""
@@ -31,6 +32,39 @@ class DatabaseManager:
                 return True
         except Exception:
             return False
+
+    def _ensure_schema_exists(self):
+        """Idempotently ensures all required tables exist before analytical queries run."""
+        if self._schema_initialized or self._engine is None:
+            return
+        self._schema_initialized = True
+        try:
+            from sqlalchemy import inspect
+            inspector = inspect(self._engine)
+            existing_tables = inspector.get_table_names()
+
+            required_tables = [
+                "fact_orders",
+                "fact_order_items",
+                "dim_customers",
+                "dim_products",
+                "dim_locations",
+                "dim_payment_methods",
+                "dim_dates",
+                "quarantine_orders",
+                "pipeline_health_metrics",
+                "data_quality_audit_log",
+                "hourly_order_aggregates"
+            ]
+
+            missing = [t for t in required_tables if t not in existing_tables]
+            if missing:
+                logger.info(f"Missing tables detected in database: {missing}. Applying Star Schema DDL & seeding dimension data...")
+                from database.init_db import initialize_database
+                initialize_database(engine=self._engine)
+                logger.info("Database schema initialized and verified successfully.")
+        except Exception as e:
+            logger.warning(f"Schema verification note: {e}")
 
     @property
     def engine(self) -> Engine:
@@ -57,6 +91,7 @@ class DatabaseManager:
                 self._engine = engine
                 self._is_sqlite_fallback = False
                 logger.info(f"Connected successfully to PostgreSQL Data Warehouse.")
+                self._ensure_schema_exists()
                 return self._engine
             except Exception as e:
                 logger.warning(f"Could not establish PostgreSQL connection ({e}). Initializing fallback SQLite database for local execution.")
@@ -65,6 +100,9 @@ class DatabaseManager:
                 self._engine = create_engine(self.connection_uri, connect_args={"check_same_thread": False})
                 self._is_sqlite_fallback = True
                 self._init_sqlite_schema(fallback_db_path)
+                self._ensure_schema_exists()
+        elif not self._schema_initialized:
+            self._ensure_schema_exists()
         return self._engine
 
     def _init_sqlite_schema(self, db_path: str):

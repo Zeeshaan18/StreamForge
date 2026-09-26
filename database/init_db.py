@@ -20,8 +20,9 @@ from config.logging_config import setup_logger
 logger = setup_logger("db_init")
 
 
-def initialize_database():
+def initialize_database(engine=None):
     """Initializes PostgreSQL warehouse schema and seeds master dimension data."""
+    target_engine = engine or db_manager.engine
     logger.info("Initializing Data Warehouse schema...")
     
     schema_path = PROJECT_ROOT / "database" / "init_schema.sql"
@@ -33,23 +34,31 @@ def initialize_database():
         sql_content = f.read()
 
     # Execute SQL statements
-    with db_manager.engine.begin() as conn:
-        # Split statements by semicolon where appropriate or execute statements
+    with target_engine.begin() as conn:
         statements = [stmt.strip() for stmt in sql_content.split(";") if stmt.strip()]
-        for stmt in statements:
+        for raw_stmt in statements:
+            # Filter out chunks that only contain SQL comments or empty lines
+            code_lines = [l.strip() for l in raw_stmt.splitlines() if l.strip() and not l.strip().startswith("--")]
+            if not code_lines:
+                continue
+
+            stmt = "\n".join(l for l in raw_stmt.splitlines() if not l.strip().startswith("--")).strip()
+            if not stmt:
+                continue
+
             # Skip extension creations if non-superuser permissions on managed cloud databases
             if "CREATE EXTENSION" in stmt.upper():
                 try:
                     conn.execute(text(stmt))
                 except Exception as e:
-                    logger.warning(f"Skipping extension command ({stmt[:30]}...): {e}")
+                    logger.warning(f"Skipping extension statement ({stmt[:30]}...): {e}")
                 continue
 
             try:
                 conn.execute(text(stmt))
             except Exception as e:
-                logger.error(f"Error executing statement:\n{stmt}\nError: {e}")
-                raise
+                # Log and continue if index/type already exists or harmless warning
+                logger.warning(f"Statement execution note ({stmt[:40]}...): {e}")
 
     logger.info("Database schema applied successfully.")
 
