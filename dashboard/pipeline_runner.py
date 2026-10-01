@@ -14,6 +14,7 @@ from config.settings import settings
 from config.logging_config import setup_logger
 from database.db_connection import db_manager
 from generator.order_generator import ContinuousOrderGenerator
+from generator.kafka_producer import get_and_clear_manual_buffer
 from spark.postgres_writer import postgres_stream_writer
 
 logger = setup_logger("pipeline_runner")
@@ -59,7 +60,16 @@ class BackgroundPipelineSupervisor:
             start_time = time.time()
             
             try:
-                # If an external dedicated worker is already actively processing, yield to avoid duplicate generation
+                # 1. Process any manual user-submitted events from fallback queue
+                manual_events = get_and_clear_manual_buffer()
+                if manual_events:
+                    manual_stats = postgres_stream_writer.write_micro_batch(manual_events)
+                    logger.info(
+                        f"Manual Stream Batch Processed: {len(manual_events)} orders | "
+                        f"Valid={manual_stats['valid']} | Quarantined={manual_stats['quarantined']}"
+                    )
+
+                # 2. If an external dedicated worker is already actively processing, yield to avoid duplicate generation
                 if not self.is_external_pipeline_active():
                     event_count = max(1, int(self.rate_per_sec * self.batch_duration_sec))
                     events: List[Dict[str, Any]] = [

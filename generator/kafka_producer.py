@@ -7,13 +7,17 @@ import json
 import time
 import argparse
 import signal
-from typing import Dict, Any, Optional
+import threading
+from typing import Dict, Any, Optional, List
 from kafka import KafkaProducer
 from generator.order_generator import ContinuousOrderGenerator
 from config.settings import settings
 from config.logging_config import setup_logger
 
 logger = setup_logger("kafka_producer")
+
+_manual_buffer_lock = threading.Lock()
+_manual_order_buffer: List[Dict[str, Any]] = []
 
 
 class IngestionProducer:
@@ -39,6 +43,7 @@ class IngestionProducer:
         self._is_mock_mode = False
         self._mock_buffer = []
         self._last_reconnect_attempt = 0.0
+        self._lock = threading.Lock()
         self._init_producer()
 
     def _check_kafka_available(self, host: str, port: int, timeout: float = 2.0) -> bool:
@@ -90,35 +95,47 @@ class IngestionProducer:
             logger.warning(f"Kafka connection failed ({e}). Running in simulation mode.")
             self._is_mock_mode = True
 
-    def publish_event(self, event: Dict[str, Any]) -> bool:
+    def publish_event(self, event: Dict[str, Any], flush: bool = False) -> bool:
         """Sends a single event to Kafka or local simulation buffer."""
         event_id = event.get("event_id")
         order_id = event.get("order_id")
 
-        # Periodically retry Kafka connection if currently in fallback
-        if self._is_mock_mode:
-            now = time.time()
-            if now - self._last_reconnect_attempt > 5.0:
-                self._last_reconnect_attempt = now
-                self._init_producer()
+        with self._lock:
+            # Periodically retry Kafka connection if currently in fallback
+            if self._is_mock_mode:
+                now = time.time()
+                if now - self._last_reconnect_attempt > 5.0:
+                    self._last_reconnect_attempt = now
+                    self._init_producer()
 
-        if self._is_mock_mode or not self._producer:
-            self._mock_buffer.append(event)
-            if len(self._mock_buffer) > 1000:
-                self._mock_buffer.pop(0)
-            return True
+            if self._is_mock_mode or not self._producer:
+                self._mock_buffer.append(event)
+                if len(self._mock_buffer) > 1000:
+                    self._mock_buffer.pop(0)
+                # Queue into global manual buffer for supervisor processing in fallback mode
+                with _manual_buffer_lock:
+                    _manual_order_buffer.append(event)
+                return True
 
-        try:
-            self._producer.send(
-                self.topic,
-                key=order_id,
-                value=event
-            )
-            return True
-        except Exception as e:
-            logger.warning(f"Failed to publish event {event_id} to Kafka: {e}. Falling back to simulation mode.")
-            self._is_mock_mode = True
-            return False
+            try:
+                future = self._producer.send(
+                    self.topic,
+                    key=order_id,
+                    value=event
+                )
+                if flush:
+                    self._producer.flush(timeout=5)
+                return True
+            except Exception as e:
+                logger.warning(f"Failed to publish event {event_id} to Kafka: {e}. Falling back to simulation mode.")
+                self._is_mock_mode = True
+                with _manual_buffer_lock:
+                    _manual_order_buffer.append(event)
+                return False
+
+    def is_live_kafka(self) -> bool:
+        """Returns True if producer is currently actively connected to a live Kafka broker."""
+        return not self._is_mock_mode and self._producer is not None
 
     def run(self, max_events: int = None):
         """Starts continuous stream generation and publishing loop."""
@@ -158,12 +175,56 @@ class IngestionProducer:
     def stop(self):
         """Flushes and cleanly closes the producer connection."""
         self.running = False
-        if self._producer:
-            try:
-                self._producer.flush(timeout=5)
-                self._producer.close(timeout=5)
-            except Exception:
-                pass
+        with self._lock:
+            if self._producer:
+                try:
+                    self._producer.flush(timeout=5)
+                    self._producer.close(timeout=5)
+                except Exception:
+                    pass
+
+
+# Default singleton instance
+_default_producer: Optional[IngestionProducer] = None
+_producer_init_lock = threading.Lock()
+
+
+def get_shared_producer() -> IngestionProducer:
+    """Returns singleton IngestionProducer instance."""
+    global _default_producer
+    with _producer_init_lock:
+        if _default_producer is None:
+            _default_producer = IngestionProducer()
+        return _default_producer
+
+
+def publish_order_event(event: Dict[str, Any], topic: str = None) -> Dict[str, Any]:
+    """
+    Publishes a single order event to the Kafka stream topic.
+    Returns status dictionary with publication mode and event identifiers.
+    """
+    producer = get_shared_producer()
+    target_topic = topic or producer.topic
+    success = producer.publish_event(event, flush=True)
+    is_live = producer.is_live_kafka()
+
+    return {
+        "success": success,
+        "mode": "KAFKA_LIVE" if is_live else "SIMULATION_BUFFER",
+        "topic": target_topic,
+        "order_id": event.get("order_id"),
+        "event_id": event.get("event_id"),
+        "timestamp": event.get("order_timestamp")
+    }
+
+
+def get_and_clear_manual_buffer() -> List[Dict[str, Any]]:
+    """Drains and returns all pending manual orders queued in fallback buffer."""
+    global _manual_order_buffer
+    with _manual_buffer_lock:
+        events = list(_manual_order_buffer)
+        _manual_order_buffer.clear()
+        return events
 
 
 def main():

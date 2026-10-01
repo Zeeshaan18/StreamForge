@@ -85,7 +85,7 @@ with col4:
     q_status = "danger" if kpis['quarantined_count'] > 0 else "success"
     render_metric_card("Quarantined Events", f"{kpis['quarantined_count']}", "Detected Anomalies", status=q_status)
 
-st.info("👈 **Select a page from the sidebar navigation** to explore Live Order Feeds, Pipeline Telemetry, Data Quality Audits, and Historical Mart Analytics.")
+st.info("👈 **Select a page from the sidebar navigation** to explore Live Order Feeds, Pipeline Telemetry, Data Quality Audits, Historical Analytics, or manually ingest transactions via **➕ Create Real-Time Order**.")
 
 # Auto-refresh loop
 if auto_refresh:

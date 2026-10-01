@@ -11,6 +11,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY config/ ./config/
 COPY database/ ./database/
+COPY generator/ ./generator/
+COPY spark/ ./spark/
 COPY dashboard/ ./dashboard/
 
 EXPOSE 8501

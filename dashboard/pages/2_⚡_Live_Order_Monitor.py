@@ -27,6 +27,8 @@ apply_custom_css()
 st.title("⚡ Live Order Stream Monitor")
 st.markdown("Real-time event stream arriving from Kafka & processed through PySpark.")
 
+st.info("💡 **Want to inject a manual transaction?** Head to **[➕ Create Real-Time Order](Create_Real_Time_Order)** to dispatch a custom order into Kafka and watch it stream here in real time!")
+
 kpis = get_executive_kpis()
 orders_df = get_recent_orders_feed(limit=50)
 geo_df = get_geographic_distribution()

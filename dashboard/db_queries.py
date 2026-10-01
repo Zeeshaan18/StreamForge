@@ -247,3 +247,74 @@ def get_pipeline_health_status() -> Dict[str, Any]:
         "table_stats": table_stats,
         "recent_metrics": recent_metrics
     }
+
+
+def get_order_status_by_id(order_id: str) -> Dict[str, Any]:
+    """
+    Looks up an order across fact_orders and quarantine_orders to verify real-time Spark persistence.
+    """
+    if not order_id:
+        return {"found": False, "status": "UNKNOWN", "destination": None, "data": None}
+
+    # 1. Check fact_orders
+    query_fact = """
+    SELECT 
+        f.order_id,
+        f.event_id,
+        f.order_status,
+        f.net_amount,
+        f.item_count,
+        f.ingest_latency_ms,
+        f.order_timestamp,
+        f.processed_at,
+        c.customer_name,
+        l.city,
+        l.country,
+        p.method_type as payment_method
+    FROM fact_orders f
+    LEFT JOIN dim_customers c ON f.customer_id = c.customer_id
+    LEFT JOIN dim_locations l ON f.location_id = l.location_id
+    LEFT JOIN dim_payment_methods p ON f.payment_method_id = p.payment_method_id
+    WHERE f.order_id = :order_id
+    LIMIT 1
+    """
+    fact_rows = db_manager.execute_query(query_fact, {"order_id": order_id})
+    if fact_rows:
+        return {
+            "found": True,
+            "status": "PERSISTED",
+            "destination": "fact_orders",
+            "data": fact_rows[0]
+        }
+
+    # 2. Check quarantine_orders
+    query_quarantine = """
+    SELECT 
+        quarantine_id,
+        event_id,
+        order_id,
+        error_code,
+        rejection_reason,
+        failed_validation_rule,
+        quarantined_at,
+        raw_payload
+    FROM quarantine_orders
+    WHERE order_id = :order_id
+    LIMIT 1
+    """
+    quar_rows = db_manager.execute_query(query_quarantine, {"order_id": order_id})
+    if quar_rows:
+        return {
+            "found": True,
+            "status": "QUARANTINED",
+            "destination": "quarantine_orders",
+            "data": quar_rows[0]
+        }
+
+    return {
+        "found": False,
+        "status": "PENDING_INGESTION",
+        "destination": None,
+        "data": None
+    }
+
